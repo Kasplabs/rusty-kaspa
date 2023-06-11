@@ -170,7 +170,7 @@ impl RpcApi for RpcCoreService {
         // TODO: consider adding an error field to SubmitBlockReport to document both the report and error fields
         let is_synced: bool = self.flow_context.hub().has_peers() && session.is_nearly_synced();
 
-        if !self.config.allow_submit_block_when_not_synced && !is_synced {
+        if !self.config.enable_unsynced_mining && !is_synced {
             // error = "Block not submitted - node is not synced"
             return Ok(SubmitBlockResponse { report: SubmitBlockReport::Reject(SubmitBlockRejectReason::IsInIBD) });
         }
@@ -189,7 +189,7 @@ impl RpcApi for RpcCoreService {
 
             // A simple heuristic check which signals that the mined block is out of date
             // and should not be accepted unless user explicitly requests
-            let daa_window_size = self.config.difficulty_window_size as u64;
+            let daa_window_size = self.config.full_difficulty_window_size as u64;
             if virtual_daa_score > daa_window_size && block.header.daa_score < virtual_daa_score - daa_window_size {
                 // error = format!("Block rejected. Reason: block DAA score {0} is too far behind virtual's DAA score {1}", block.header.daa_score, virtual_daa_score)
                 return Ok(SubmitBlockResponse { report: SubmitBlockReport::Reject(SubmitBlockRejectReason::BlockInvalid) });
@@ -235,7 +235,8 @@ impl RpcApi for RpcCoreService {
             return Err(RpcError::CoinbasePayloadLengthAboveMax(self.config.max_coinbase_payload_len));
         }
 
-        let is_nearly_synced = self.config.is_nearly_synced(block_template.selected_parent_timestamp);
+        let is_nearly_synced =
+            self.config.is_nearly_synced(block_template.selected_parent_timestamp, block_template.selected_parent_daa_score);
         Ok(GetBlockTemplateResponse {
             block: (&block_template.block).into(),
             is_synced: self.flow_context.hub().has_peers() && is_nearly_synced,
@@ -421,7 +422,7 @@ impl RpcApi for RpcCoreService {
     }
 
     async fn get_block_count_call(&self, _: GetBlockCountRequest) -> RpcResult<GetBlockCountResponse> {
-        Ok(self.consensus_manager.consensus().session().await.get_sync_info())
+        Ok(self.consensus_manager.consensus().session().await.estimate_block_count())
     }
 
     async fn get_utxos_by_addresses_call(&self, request: GetUtxosByAddressesRequest) -> RpcResult<GetUtxosByAddressesResponse> {
@@ -483,11 +484,11 @@ impl RpcApi for RpcCoreService {
     async fn get_block_dag_info_call(&self, _: GetBlockDagInfoRequest) -> RpcResult<GetBlockDagInfoResponse> {
         let consensus = self.consensus_manager.consensus();
         let session = consensus.session().await;
-        let sync_info = session.get_sync_info();
+        let block_count = session.estimate_block_count();
         Ok(GetBlockDagInfoResponse::new(
             self.config.net,
-            sync_info.block_count,
-            sync_info.header_count,
+            block_count.block_count,
+            block_count.header_count,
             session.get_tips(),
             self.consensus_converter.get_difficulty_ratio(session.get_virtual_bits()),
             session.get_virtual_past_median_time(),
